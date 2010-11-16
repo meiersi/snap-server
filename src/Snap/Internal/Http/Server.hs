@@ -22,7 +22,6 @@ import           Data.ByteString.Internal (c2w, w2c)
 import qualified Data.ByteString.Nums.Careless.Int as Cvt
 import           Data.Int
 import           Data.IORef
-import           Data.Iteratee.WrappedByteString (unWrap)
 import           Data.List (foldl')
 import qualified Data.Map as Map
 import           Data.Maybe (fromJust, catMaybes, fromMaybe)

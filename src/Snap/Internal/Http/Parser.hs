@@ -22,7 +22,7 @@ import             Control.Arrow (second)
 import             Control.Monad (liftM)
 import "monads-fd" Control.Monad.Trans
 import             Data.Attoparsec hiding (many, Result(..))
-import             Data.Attoparsec.Iteratee
+import             Data.Attoparsec.Enumerator
 import             Data.Bits
 import             Data.ByteString (ByteString)
 import qualified   Data.ByteString as S
@@ -34,7 +34,6 @@ import             Data.DList (DList)
 import qualified   Data.DList as D
 import             Data.List (foldl')
 import             Data.Int
-import             Data.Iteratee.WrappedByteString
 import             Data.Map (Map)
 import qualified   Data.Map as Map
 import             Data.Maybe (catMaybes)
@@ -43,8 +42,8 @@ import             Data.Vector.Unboxed (Vector)
 import             Data.Word (Word8, Word64)
 import             Prelude hiding (take, takeWhile)
 ------------------------------------------------------------------------------
-import             Snap.Internal.Http.Types hiding (Enumerator)
-import             Snap.Iteratee hiding (take, foldl', filter)
+import             Snap.Internal.Http.Types
+import             Snap.Iteratee hiding (take, map)
 
 
 ------------------------------------------------------------------------------
@@ -71,7 +70,7 @@ instance Show IRequest where
 
 ------------------------------------------------------------------------------
 parseRequest :: (Monad m) => Iteratee m (Maybe IRequest)
-parseRequest = parserToIteratee pRequest
+parseRequest = iterParser pRequest
 
 
 ------------------------------------------------------------------------------
@@ -79,7 +78,7 @@ readChunkedTransferEncoding :: (Monad m) =>
                                Iteratee m a
                             -> m (Iteratee m a)
 readChunkedTransferEncoding iter = do
-    i <- chunkParserToEnumerator (parserToIteratee pGetTransferChunk)
+    i <- chunkParserToEnumerator (iterParser pGetTransferChunk)
                                  iter
     return i
 

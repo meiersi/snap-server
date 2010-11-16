@@ -42,7 +42,6 @@ import             Data.ByteString.Internal (c2w, w2c)
 import qualified   Data.ByteString.Unsafe as B
 import qualified   Data.ByteString as B
 import             Data.IORef
-import             Data.Iteratee.WrappedByteString
 import             Data.Typeable
 import             Foreign hiding (new)
 import             Foreign.C.Error
@@ -750,31 +749,35 @@ getWriteEnd = writeOut
 
 
 enumerate :: (MonadIO m) => Connection -> Enumerator m a
-enumerate = loop
+enumerate conn = loop
   where
-    loop conn f = do
-        s <- liftIO $ recvData conn bLOCKSIZE
-        sendOne conn f s
+    recvIt = liftIO . recvData conn bLOCKSIZE
 
-    sendOne conn f s = do
-        v <- runIter f (if B.null s
-                         then EOF Nothing
-                         else Chunk $ WrapBS s)
-        case v of
-          r@(Done _ _)      -> return $ liftI r
-          (Cont k Nothing)  -> loop conn k
-          (Cont _ (Just e)) -> return $ throwErr e
+    loop f = do
+        s <- recvIt
+        sendOne f s
+
+    sendOne f s = do
+        let iter = if B.null s
+                     then enumEOF f
+                     else enumBS f s
+        f' <- lift $ runIteratee iter
+
+        case f' of
+          (Yield x st)      -> yield x st
+          r@(Continue _)    -> loop r
+          (Error e)         -> throwError e
 
 
 writeOut :: (MonadIO m) => Connection -> Iteratee m ()
-writeOut conn = IterateeG out
+writeOut conn = loop
   where
-    out c@(EOF _)   = return $ Done () c
+    sendIt = liftIO . sendData conn
 
-    out (Chunk s) = do
-        let x = unWrap s
+    loop = continue k
 
-        liftIO $ sendData conn x
-
-        return $ Cont (writeOut conn) Nothing
+    k EOF = yield () EOF
+    k (Chunks xs) = do
+        sendIt $ S.concat xs
+        loop
 
