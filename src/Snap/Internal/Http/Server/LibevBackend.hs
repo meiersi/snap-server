@@ -124,7 +124,8 @@ sendFile c fp start sz = do
             (closeFd)
             (go start sz)
 #else
-    enumFilePartial fp (start,start+sz) (getWriteEnd c) >>= run
+    runIteratee (getWriteEnd c) >>=
+                run_ . enumFilePartial fp (start,start+sz)
     return ()
 #endif
 
