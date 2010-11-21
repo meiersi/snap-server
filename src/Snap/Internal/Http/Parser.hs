@@ -8,7 +8,7 @@ module Snap.Internal.Http.Parser
   ( IRequest(..)
   , parseRequest
   , readChunkedTransferEncoding
-  , parserToIteratee
+  , iterParser
   , parseCookie
   , parseUrlEncoded
   , writeChunkedTransferEncoding
@@ -40,10 +40,11 @@ import             Data.Maybe (catMaybes)
 import qualified   Data.Vector.Unboxed as Vec
 import             Data.Vector.Unboxed (Vector)
 import             Data.Word (Word8, Word64)
-import             Prelude hiding (take, takeWhile)
+import             Prelude hiding (head, take, takeWhile)
+import qualified   Prelude
 ------------------------------------------------------------------------------
 import             Snap.Internal.Http.Types
-import             Snap.Iteratee hiding (take, map)
+import             Snap.Iteratee hiding (map, take)
 
 
 ------------------------------------------------------------------------------
@@ -69,18 +70,15 @@ instance Show IRequest where
 
 
 ------------------------------------------------------------------------------
-parseRequest :: (Monad m) => Iteratee m (Maybe IRequest)
+parseRequest :: (Monad m) => Iteratee ByteString m (Maybe IRequest)
 parseRequest = iterParser pRequest
 
 
 ------------------------------------------------------------------------------
 readChunkedTransferEncoding :: (Monad m) =>
-                               Iteratee m a
-                            -> m (Iteratee m a)
-readChunkedTransferEncoding iter = do
-    i <- chunkParserToEnumerator (iterParser pGetTransferChunk)
-                                 iter
-    return i
+                               Enumeratee ByteString ByteString m a
+readChunkedTransferEncoding =
+    chunkParserToEnumeratee (iterParser pGetTransferChunk)
 
 
 ------------------------------------------------------------------------------
@@ -107,6 +105,8 @@ toHex n' = s
 -- chunked transfer-encoding. Example usage:
 --
 --
+-- > FIXME this text is now wrong
+--
 -- > > (writeChunkedTransferEncoding
 -- >     (enumLBS (L.fromChunks ["foo","bar","quux"]))
 -- >     stream2stream) >>=
@@ -115,98 +115,76 @@ toHex n' = s
 -- >
 -- > Chunk "a\r\nfoobarquux\r\n0\r\n\r\n" Empty
 --
-writeChunkedTransferEncoding :: Enumerator IO a
-writeChunkedTransferEncoding it = do
-    let out = wrap it
-    return out
+writeChunkedTransferEncoding :: Enumeratee ByteString ByteString IO a
+writeChunkedTransferEncoding = checkDone start
 
   where
-    wrap iter = bufIt (0,D.empty) iter
+    start = bufIt 0 D.empty
 
     bufSiz = 16284
 
     sendOut :: DList ByteString
-            -> Iteratee IO a
-            -> IO (Iteratee IO a)
-    sendOut dl iter = do
+            -> (Stream ByteString -> Iteratee ByteString IO a)
+            -> Iteratee ByteString IO (Step ByteString IO a)
+    sendOut dl k = do
         let chunks = D.toList dl
         let bs     = L.fromChunks chunks
         let n      = L.length bs
 
         if n == 0
-          then return iter
+          then return $ Continue k
           else do
             let o = L.concat [ L.fromChunks [ toHex (toEnum . fromEnum $ n)
                                             , "\r\n" ]
                              , bs
                              , "\r\n" ]
 
-            enumLBS o iter
+            lift $ runIteratee $ enumLBS o (Continue k)
 
 
-    bufIt (n,dl) iter = IterateeG $ \s -> do
-        case s of
-          (EOF Nothing) -> do
-               i'  <- sendOut dl iter
-               j   <- liftM liftI $ runIter i' (Chunk (WrapBS "0\r\n\r\n"))
-               runIter j (EOF Nothing)
+    
+    bufIt :: Int
+          -> DList ByteString
+          -> (Stream ByteString -> Iteratee ByteString IO a)
+          -> Iteratee ByteString IO (Step ByteString IO a)
+    bufIt n dl k = do
+        mbS <- head
+        case mbS of
+          Nothing -> do
+              step  <- sendOut dl k
+              step' <- lift $ runIteratee $ enumBS "0\r\n\r\n" step
+              lift $ runIteratee $ enumEOF step'
 
-          (EOF e) -> return $ Cont undefined e
+          (Just s) -> do
+              let m = S.length s
 
-          (Chunk (WrapBS x)) -> do
-               let m   = S.length x
+              if m == 0
+                then bufIt n dl k
+                else do
+                  let n'  = m + n
+                  let dl' = D.snoc dl s
 
-               if m == 0
-                 then return $ Cont (bufIt (n,dl) iter) Nothing
-                 else do
-                   let n'  = m + n
-                   let dl' = D.snoc dl x
-
-                   if n' > bufSiz
-                     then do
-                       i' <- sendOut dl' iter
-                       return $ Cont (bufIt (0,D.empty) i') Nothing
-                     else return $ Cont (bufIt (n',dl') iter) Nothing
+                  if n' > bufSiz
+                    then do
+                      step <- sendOut dl' k
+                      checkDone start step
+                    else bufIt n' dl' k
 
 
 ------------------------------------------------------------------------------
-chunkParserToEnumerator :: (Monad m) =>
-                           Iteratee m (Maybe ByteString)
-                        -> Iteratee m a
-                        -> m (Iteratee m a)
-chunkParserToEnumerator getChunk client = return $ do
+chunkParserToEnumeratee :: (Monad m) =>
+                           Iteratee ByteString m (Maybe ByteString)
+                        -> Enumeratee ByteString ByteString m a
+chunkParserToEnumeratee getChunk client = do
     mbB <- getChunk
-    maybe (finishIt client) (sendBS client) mbB
+    maybe finishIt sendBS mbB
 
   where
-    sendBS iter s = do
-        v <- lift $ runIter iter (Chunk $ toWrap $ L.fromChunks [s])
+    sendBS s = do
+        step' <- lift $ runIteratee $ enumBS s client
+        chunkParserToEnumeratee getChunk step'
 
-        case v of
-          (Done _ (EOF (Just e))) -> throwErr e
-
-          (Done x _) -> return x
-
-          (Cont _ (Just e)) -> throwErr e
-
-          (Cont k Nothing) -> joinIM $
-                              chunkParserToEnumerator getChunk k
-
-    finishIt iter = do
-        e <- lift $ sendEof iter
-
-        case e of
-          Left x  -> throwErr x
-          Right x -> return x
-
-    sendEof iter = do
-        v <- runIter iter (EOF Nothing)
-
-        return $ case v of
-          (Done _ (EOF (Just e))) -> Left e
-          (Done x _)              -> Right x
-          (Cont _ (Just e))       -> Left e
-          (Cont _ _)              -> Left $ Err $ "divergent iteratee"
+    finishIt = lift $ runIteratee $ enumEOF client
 
 
 ------------------------------------------------------------------------------

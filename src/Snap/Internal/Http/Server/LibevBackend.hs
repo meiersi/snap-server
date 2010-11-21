@@ -33,14 +33,14 @@ module Snap.Internal.Http.Server.LibevBackend
 ---------------------------
 
 ------------------------------------------------------------------------------
-import             Control.Concurrent
+import             Control.Concurrent hiding (yield)
 import             Control.Exception
 import             Control.Monad
 import "monads-fd" Control.Monad.Trans
 import             Data.ByteString (ByteString)
 import             Data.ByteString.Internal (c2w, w2c)
-import qualified   Data.ByteString.Unsafe as B
-import qualified   Data.ByteString as B
+import qualified   Data.ByteString.Unsafe as S
+import qualified   Data.ByteString as S
 import             Data.IORef
 import             Data.Typeable
 import             Foreign hiding (new)
@@ -55,7 +55,7 @@ import             Prelude hiding (catch)
 -- FIXME: should be HashSet, make that later.
 import qualified   Data.Concurrent.HashMap as H
 import             Data.Concurrent.HashMap (HashMap)
-import             Snap.Iteratee
+import             Snap.Iteratee hiding (map)
 import             Snap.Internal.Debug
 import             Snap.Internal.Http.Server.Date
 
@@ -324,7 +324,7 @@ getAddr :: SockAddr -> IO (ByteString, Int)
 getAddr addr =
     case addr of
       SockAddrInet p ha -> do
-          s <- liftM (B.pack . map c2w) (inet_ntoa ha)
+          s <- liftM (S.pack . map c2w) (inet_ntoa ha)
           return (s, fromIntegral p)
 
       a -> throwIO $ AddressNotSupportedException (show a)
@@ -606,7 +606,7 @@ getHostAddr :: Int
 getHostAddr p s = do
     h <- if s == "*"
           then return iNADDR_ANY
-          else inet_addr (map w2c . B.unpack $ s)
+          else inet_addr (map w2c . S.unpack $ s)
 
     return $ SockAddrInet (fromIntegral p) h
 
@@ -654,7 +654,7 @@ recvData conn n = do
 
     if sz == 0
       then return ""
-      else B.packCStringLen ((castPtr cstr),(fromEnum sz))
+      else S.packCStringLen ((castPtr cstr),(fromEnum sz))
 
   where
     io       = _connReadIOObj conn
@@ -689,9 +689,9 @@ recvData conn n = do
 
 sendData :: Connection -> ByteString -> IO ()
 sendData conn bs = do
-    let len = B.length bs
+    let len = S.length bs
     dbg $ "entered w/ " ++ show len ++ " bytes"
-    written <- B.unsafeUseAsCString bs $ \cstr ->
+    written <- S.unsafeUseAsCString bs $ \cstr ->
         throwErrnoIfMinus1RetryMayBlock
                    "sendData"
                    (c_write fd cstr (toEnum len))
@@ -701,14 +701,14 @@ sendData conn bs = do
     tickleTimeout conn
 
     let n = fromEnum written
-    let last10 = B.drop (n-10) $ B.take n bs
+    let last10 = S.drop (n-10) $ S.take n bs
 
     dbg $ "wrote " ++ show written ++ " bytes, last 10='" ++ show last10 ++ "'"
 
     if n < len
        then do
          dbg $ "short write, need to write " ++ show (len-n) ++ " more bytes"
-         sendData conn $ B.drop n bs
+         sendData conn $ S.drop n bs
        else return ()
 
   where
@@ -740,27 +740,32 @@ sendData conn bs = do
         dbg "waitForLock: took mvar"
 
 
-getReadEnd :: Connection -> Enumerator IO a
+getReadEnd :: Connection -> Enumerator ByteString IO a
 getReadEnd = enumerate
 
 
-getWriteEnd :: Connection -> Iteratee IO ()
+getWriteEnd :: Connection -> Iteratee ByteString IO ()
 getWriteEnd = writeOut
 
 
-enumerate :: (MonadIO m) => Connection -> Enumerator m a
+enumerate :: (MonadIO m) => Connection -> Enumerator ByteString m a
 enumerate conn = loop
   where
-    recvIt = liftIO . recvData conn bLOCKSIZE
+    recvIt :: (MonadIO m) => Iteratee ByteString m ByteString
+    recvIt = liftIO $ recvData conn bLOCKSIZE
 
     loop f = do
         s <- recvIt
         sendOne f s
 
+    sendOne :: (MonadIO m) =>
+               Step ByteString m a
+            -> ByteString
+            -> Iteratee ByteString m a
     sendOne f s = do
-        let iter = if B.null s
+        let iter = if S.null s
                      then enumEOF f
-                     else enumBS f s
+                     else enumBS s f
         f' <- lift $ runIteratee iter
 
         case f' of
@@ -769,7 +774,7 @@ enumerate conn = loop
           (Error e)         -> throwError e
 
 
-writeOut :: (MonadIO m) => Connection -> Iteratee m ()
+writeOut :: (MonadIO m) => Connection -> Iteratee ByteString m ()
 writeOut conn = loop
   where
     sendIt = liftIO . sendData conn
