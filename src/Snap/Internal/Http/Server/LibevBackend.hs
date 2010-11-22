@@ -752,27 +752,31 @@ getWriteEnd = writeOut
 enumerate :: (MonadIO m) => Connection -> Enumerator ByteString m a
 enumerate conn = loop
   where
+    dbg s = debug $ "Backend.enumerate(" ++ show (_socketFd conn) ++ "): " ++ s
+
     recvIt :: (MonadIO m) => Iteratee ByteString m ByteString
     recvIt = liftIO $ recvData conn bLOCKSIZE
 
-    loop f = do
+    loop (Continue k) = do
         s <- recvIt
-        sendOne f s
+        sendOne k s
+    loop x = returnI x
 
-    sendOne :: (MonadIO m) =>
-               Step ByteString m a
-            -> ByteString
-            -> Iteratee ByteString m a
-    sendOne f s = do
-        let iter = if S.null s
-                     then enumEOF f
-                     else enumBS s f
-        f' <- lift $ runIteratee iter
+    sendOne k s | S.null s  = do
+        dbg "sending EOF to continuation"
+        enumEOF $ Continue k
 
-        case f' of
-          (Yield x st)      -> yield x st
-          r@(Continue _)    -> loop r
-          (Error e)         -> throwError e
+                | otherwise = do
+        dbg $ "sending " ++ show s ++ " to continuation"
+        step <- lift $ runIteratee $ k $ Chunks [s]
+        case step of
+          (Yield x st)   -> do
+                      dbg $ "got yield, remainder is " ++ show st
+                      yield x st
+          r@(Continue _) -> do
+                      dbg $ "got continue"
+                      loop r
+          (Error e)      -> throwError e
 
 
 writeOut :: (MonadIO m) => Connection -> Iteratee ByteString m ()

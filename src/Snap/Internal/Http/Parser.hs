@@ -44,6 +44,8 @@ import             Prelude hiding (head, take, takeWhile)
 import qualified   Prelude
 ------------------------------------------------------------------------------
 import             Snap.Internal.Http.Types
+import             Snap.Internal.Debug
+import             Snap.Internal.Iteratee.Debug
 import             Snap.Iteratee hiding (map, take)
 
 
@@ -75,10 +77,12 @@ parseRequest = iterParser pRequest
 
 
 ------------------------------------------------------------------------------
-readChunkedTransferEncoding :: (Monad m) =>
+readChunkedTransferEncoding :: (MonadIO m) =>
                                Enumeratee ByteString ByteString m a
 readChunkedTransferEncoding =
-    chunkParserToEnumeratee (iterParser pGetTransferChunk)
+    chunkParserToEnumeratee $
+    iterateeDebugWrapper "pGetTransferChunk" $
+    iterParser pGetTransferChunk
 
 
 ------------------------------------------------------------------------------
@@ -172,16 +176,31 @@ writeChunkedTransferEncoding = checkDone start
 
 
 ------------------------------------------------------------------------------
-chunkParserToEnumeratee :: (Monad m) =>
+chunkParserToEnumeratee :: (MonadIO m) =>
                            Iteratee ByteString m (Maybe ByteString)
                         -> Enumeratee ByteString ByteString m a
 chunkParserToEnumeratee getChunk client = do
+    debug $ "chunkParserToEnumeratee: getting chunk"
     mbB <- getChunk
+    debug $ "chunkParserToEnumeratee: getChunk was " ++ show mbB
+    mbX <- peek
+    debug $ "chunkParserToEnumeratee: .. and peek is " ++ show mbX
+
+
     maybe finishIt sendBS mbB
 
   where
+    whatWasReturn (Continue _) = "continue"
+    whatWasReturn (Yield _ z)  = "yield, with remainder " ++ show z
+    whatWasReturn (Error e)    = "error, with " ++ show e
+
     sendBS s = do
         step' <- lift $ runIteratee $ enumBS s client
+        debug $ "chunkParserToEnumeratee: after sending "
+                  ++ show s ++ ", return was "
+                  ++ whatWasReturn step'
+        mbX <- peek
+        debug $ "chunkParserToEnumeratee: .. and peek is " ++ show mbX
         chunkParserToEnumeratee getChunk step'
 
     finishIt = lift $ runIteratee $ enumEOF client
@@ -229,7 +248,8 @@ pSpaces = takeWhile (isSpace . w2c)
 ------------------------------------------------------------------------------
 -- | Parser for the internal request data type.
 pRequest :: Parser (Maybe IRequest)
-pRequest = (Just <$> pRequest') <|> (endOfInput *> pure Nothing)
+pRequest = (Just <$> pRequest') <|>
+           (option "" crlf *> endOfInput *> pure Nothing)
 
 
 ------------------------------------------------------------------------------

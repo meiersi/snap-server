@@ -305,7 +305,11 @@ runHTTP lh lip lp rip rp alog elog
                                    handler
         let iter = iterateeDebugWrapper "httpSession iteratee" iter1
 
+        debug "runHTTP/go: prepping iteratee for start"
+
         step <- liftIO $ runIteratee iter
+
+        debug "runHTTP/go: running..."
         run_ $ readEnd step
         debug "runHTTP/go: finished"
 
@@ -349,6 +353,7 @@ httpSession writeEnd' ibuf onSendFile tickle handler = do
 
     liftIO $ debug "Server.httpSession: entered"
     mreq  <- receiveRequest
+    liftIO $ debug "Server.httpSession: receiveRequest finished"
 
     -- successfully got a request, so restart timer
     liftIO tickle
@@ -439,7 +444,10 @@ checkExpect100Continue req writeEnd = do
 ------------------------------------------------------------------------------
 receiveRequest :: ServerMonad (Maybe Request)
 receiveRequest = do
-    mreq <- {-# SCC "receiveRequest/parseRequest" #-} lift parseRequest
+    debug "receiveRequest: entered"
+    mreq <- {-# SCC "receiveRequest/parseRequest" #-} lift $
+            iterateeDebugWrapper "parseRequest" parseRequest
+    debug "receiveRequest: parseRequest returned"
 
     case mreq of
       (Just ireq) -> do
@@ -463,8 +471,7 @@ receiveRequest = do
     -- if no content-length and no chunked encoding, enumerate the entire
     -- socket and close afterwards
     setEnumerator :: Request -> ServerMonad ()
-    setEnumerator req =
-        {-# SCC "receiveRequest/setEnumerator" #-}
+    setEnumerator req = {-# SCC "receiveRequest/setEnumerator" #-} do
         if isChunked
           then do
               liftIO $ debug $ "receiveRequest/setEnumerator: " ++
@@ -528,7 +535,9 @@ receiveRequest = do
             senum <- liftIO $ readIORef $ rqBody req
             let (SomeEnumerator enum) = senum
             consumeStep <- liftIO $ runIteratee consume
-            step <- lift $ takeNoMoreThan maximumPOSTBodySize consumeStep
+            step <- liftIO $
+                    runIteratee $
+                    joinI $ takeNoMoreThan maximumPOSTBodySize consumeStep
             body <- liftM S.concat $ lift $ enum step
             let newParams = parseUrlEncoded body
 
@@ -635,6 +644,8 @@ sendResponse req rsp' writeEnd onSendFile = do
                   (SendFile f (Just (st,_))) ->
                       lift $ whenSendFile headerString rsp f st
 
+    debug "sendResponse: response sent"
+
     return $! (bs,x)
 
   where
@@ -652,13 +663,15 @@ sendResponse req rsp' writeEnd onSendFile = do
         -- socket.
         let enum = if rspTransformingRqBody rsp
                      then enumBS hs >==> e
-                     else enumBS hs >==> e >==> enumEOF
+                     else enumBS hs >==> e >==> (joinI . I.take 0)
 
         let hl = fromIntegral $ S.length hs
 
         debug $ "sendResponse: whenEnum: enumerating bytes"
 
-        outstep <- lift $ runIteratee $ countBytes $ returnI writeEnd
+        outstep <- lift $ runIteratee $
+                   iterateeDebugWrapper "countBytes writeEnd" $
+                   countBytes $ returnI writeEnd
         (x,bs) <- enum outstep
         debug $ "sendResponse: whenEnum: " ++ Prelude.show bs ++ " bytes enumerated"
 
@@ -712,7 +725,10 @@ sendResponse req rsp' writeEnd onSendFile = do
                   let r' = setHeader "Transfer-Encoding" "chunked" r
                   let origE = rspBodyToEnum $ rspBody r
 
-                  let e i = writeChunkedTransferEncoding i >>= origE
+                  let e i = do
+                      step <- lift $ runIteratee $ joinI $
+                              writeChunkedTransferEncoding i
+                      origE step
 
                   return $ r' { rspBody = Enum e }
 
@@ -740,7 +756,7 @@ sendResponse req rsp' writeEnd onSendFile = do
         i :: forall z . Enumerator ByteString IO z
           -> Enumerator ByteString IO z
         i enum step = do
-            step' <- takeExactly cl step
+            step' <- lift $ runIteratee $ joinI $ takeExactly cl step
             enum step'
 
 
