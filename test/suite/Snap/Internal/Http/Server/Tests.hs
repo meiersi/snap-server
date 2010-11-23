@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PackageImports #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module Snap.Internal.Http.Server.Tests
   ( tests ) where
@@ -11,7 +12,8 @@ import             Control.Exception ( try
                                      , throwIO
                                      , bracket
                                      , finally
-                                     , SomeException )
+                                     , SomeException
+                                     , Exception )
 import             Control.Monad
 import "monads-fd" Control.Monad.Trans
 import qualified   Data.ByteString.Char8 as S
@@ -26,6 +28,8 @@ import qualified   Data.Map as Map
 import             Data.Maybe (fromJust)
 import             Data.Time.Calendar
 import             Data.Time.Clock
+import             Data.Typeable
+import             Data.Word
 import qualified   Network.HTTP as HTTP
 import qualified   Network.Socket.ByteString as N
 import             Prelude hiding (take)
@@ -42,14 +46,13 @@ import             Snap.Internal.Http.Types
 import             Snap.Internal.Http.Server
 import qualified   Snap.Iteratee as I
 import             Snap.Iteratee hiding (map)
+import             Snap.Internal.Http.Server.Backend
 import             Snap.Test.Common
 import             Snap.Types
 
-#ifdef LIBEV
-import qualified Snap.Internal.Http.Server.LibevBackend as Backend
-#else
-import qualified Snap.Internal.Http.Server.SimpleBackend as Backend
-#endif
+data TestException = TestException
+  deriving (Show, Typeable)
+instance Exception TestException
 
 
 tests :: [Test]
@@ -78,10 +81,7 @@ tests = [ testHttpRequest1
 testTrivials :: Test
 testTrivials = testCase "server/trivials" $ do
     let !v = Svr.snapServerVersion
-    let !s1 = show Backend.BackendTerminatedException
-    let !s2 = show Backend.TimeoutException
-
-    return $! v `seq` s1 `seq` s2 `seq` ()
+    return $! v `seq` ()
 
 ------------------------------------------------------------------------------
 -- HTTP request tests
@@ -357,7 +357,7 @@ sampleRequest3' =
 
 
 rsm :: ServerMonad a -> Iteratee ByteString IO a
-rsm = runServerMonad "localhost" "127.0.0.1" 80 "127.0.0.1" 58382 alog elog
+rsm = runServerMonad "localhost" (SessionInfo "127.0.0.1" 80 "127.0.0.1" 58382 False) alog elog
   where
     alog = const . const . return $ ()
     elog = const $ return ()
@@ -506,8 +506,8 @@ testHttp1 = testCase "server/httpSession" $ do
 
     let (iter,onSendFile) = mkIter ref
 
-    runHTTP "localhost" "127.0.0.1" 80 "127.0.0.1" 58384
-            Nothing Nothing enumBody iter onSendFile (return ()) echoServer
+    runHTTP Nothing Nothing echoServer "localhost" (SessionInfo "127.0.0.1" 80 "127.0.0.1" 58384 False)
+            enumBody iter onSendFile (return ())
 
     s <- readIORef ref
 
@@ -560,8 +560,8 @@ testChunkOn1_0 = testCase "server/transfer-encoding chunked" $ do
     let (iter,onSendFile) = mkIter ref
 
     done <- newEmptyMVar
-    forkIO (runHTTP "localhost" "127.0.0.1" 80 "127.0.0.1" 58384
-                Nothing Nothing enumBody iter onSendFile (return ()) f
+    forkIO (runHTTP Nothing Nothing f "localhost" (SessionInfo "127.0.0.1" 80 "127.0.0.1" 58384 False)
+                enumBody iter onSendFile (return ())
             `finally` putMVar done ())
 
     takeMVar done
@@ -605,18 +605,15 @@ testHttp2 = testCase "server/connection: close" $ do
 
     done <- newEmptyMVar
 
-    forkIO (runHTTP "localhost"
-                    "127.0.0.1"
-                    80
-                    "127.0.0.1"
-                    58384
+    forkIO (runHTTP Nothing
                     Nothing
-                    Nothing
+                    echoServer2
+                    "localhost"
+                    (SessionInfo "127.0.0.1" 80 "127.0.0.1" 58384 False)
                     enumBody
                     iter
                     onSendFile
-                    (return ())
-                    echoServer2 `finally` putMVar done ())
+                    (return ()) `finally` putMVar done ())
 
     takeMVar done
 
@@ -649,18 +646,15 @@ testHttp100 = testCase "server/Expect: 100-continue" $ do
 
     let (iter,onSendFile) = mkIter ref
 
-    runHTTP "localhost"
-            "127.0.0.1"
-            80
-            "127.0.0.1"
-            58384
+    runHTTP Nothing
             Nothing
-            Nothing
+            echoServer2
+            "localhost"
+            (SessionInfo "127.0.0.1" 80 "127.0.0.1" 58384 False)
             enumBody
             iter
             onSendFile
             (return ())
-            echoServer2
 
     s <- readIORef ref
 
@@ -691,18 +685,15 @@ testExpectGarbage = testCase "server/Expect: garbage" $ do
 
     let (iter,onSendFile) = mkIter ref
 
-    runHTTP "localhost"
-            "127.0.0.1"
-            80
-            "127.0.0.1"
-            58384
+    runHTTP Nothing
             Nothing
-            Nothing
+            echoServer2
+            "localhost"
+            (SessionInfo "127.0.0.1" 80 "127.0.0.1" 58384 False)
             enumBody
             iter
             onSendFile
             (return ())
-            echoServer2
 
     s <- readIORef ref
 
@@ -736,7 +727,7 @@ sendFileFoo = sendFile "data/fileServe/foo.html"
 
 testSendFile :: Test
 testSendFile = testCase "server/sendFile" $ do
-    bracket (forkIO $ httpServe "*" port "localhost"
+    bracket (forkIO $ httpServe [HttpPort "*" port] Nothing "localhost"
                                 Nothing Nothing
                     $ runSnap sendFileFoo)
             (killThread)
@@ -767,8 +758,8 @@ testSendFile = testCase "server/sendFile" $ do
 testServerStartupShutdown :: Test
 testServerStartupShutdown = testCase "server/startup/shutdown" $ do
     bracket (forkIO $
-             httpServe "*"
-                       port
+             httpServe [HttpPort "*" port]
+                       Nothing
                        "localhost"
                        (Just "test-access.log")
                        (Just "test-error.log")
@@ -808,8 +799,8 @@ testServerStartupShutdown = testCase "server/startup/shutdown" $ do
 testServerShutdownWithOpenConns :: Test
 testServerShutdownWithOpenConns = testCase "server/shutdown-open-conns" $ do
     tid <- forkIO $
-           httpServe "127.0.0.1"
-                     port
+           httpServe [HttpPort "127.0.0.1" port]
+                     Nothing
                      "localhost"
                      Nothing
                      Nothing
@@ -831,7 +822,7 @@ testServerShutdownWithOpenConns = testCase "server/shutdown-open-conns" $ do
                  N.sendAll sock "Connection: close\r\n\r\n"
 
                  resp <- recvAll sock
-                 when (S.null resp) $ throwIO Backend.BackendTerminatedException
+                 when (S.null resp) $ throwIO TestException
 
                  let s = S.unpack $ Prelude.head $ ditchHeaders $ S.lines resp
                  debug $ "got HTTP response " ++ s ++ ", we shouldn't be here...."
